@@ -1,19 +1,95 @@
 local math_seed = math.randomseed
 local math_rand = math.random
 local tab_concat = table.concat
-local str_sub = string.sub
-local str_find = string.find
 
 
 local _M = {
-    shm= nil
+    shm= nil,
     expires= nil,
     replays= nil,
     timeout= nil,
     salt= nil,
     credentials= {},
-    default_realm= "realm",
 }
+
+
+local function get_value(header, name, quoted)
+    local n = header:find("[, ]" .. name .. "=")
+    if not n then return nil end
+    
+    n = n + 1 + #name + 1  -- 1 for ',' or ' ', 1 for '='
+    
+    local states = {sw_start= 0, sw_value= 2, sw_done= 3}
+    local value_start, value_end
+    local state = states.sw_start
+    
+    for i = n, #header, 1 do
+        local c = string.sub(header, i, i)
+
+        if state == states.sw_start then
+            if quoted then
+                if c == "\"" then
+                    state, value_start = states.sw_value, i+1
+                else
+                    return nil
+                end
+            else
+                state, value_start = states.sw_value, i
+            end
+            
+        elseif state == states.sw_value then
+            if quoted then
+                if c == "\"" then
+                    state, value_end = states.sw_done, i-1
+                end
+            elseif c == "," then
+                state, value_end = states.sw_done, i-1
+            elseif i == #header then
+                state, value_end = states.sw_done, i
+            end
+        end
+    end
+    if state ~= states.sw_done then
+        return nil
+    end
+    
+    return header:sub(value_start, value_end)
+end
+
+
+local function get_context(header)
+    local prefix = "Digest "
+    if header:sub(1, #prefix) ~= prefix then
+        return nil
+    end
+
+    local ctx = {}
+
+    ctx.user = get_value(header, "username", true)
+    ctx.qop = get_value(header, "qop", false)
+    ctx.realm = get_value(header, "realm", true)
+    ctx.nonce = get_value(header, "nonce", true)
+    ctx.nc = get_value(header, "nc", false)
+    ctx.uri = get_value(header, "uri", true)
+    ctx.cnonce = get_value(header, "cnonce", true)
+    ctx.response = get_value(header, "response", true)
+    ctx.opaque = get_value(header, "opaque", true)
+
+    -- `opaque` is optional
+    if not ctx.user or not ctx.response or not ctx.uri or 
+        not ctx.nonce or not ctx.realm 
+    then
+        return nil
+    end
+
+    -- if qop exsits, "auth" is the only allowed value for it
+    if ctx.qop and (ctx.qop ~= "auth" or not ctx.cnonce or not ctx.nc) 
+    then
+        return nil
+    end
+
+    return ctx
+end
 
 
 local function parse_line(line)
@@ -77,15 +153,15 @@ local function parse_line(line)
 end
 
 
-local function next_nonce(shared_dict, salt, timeout)
+local function next_nonce(shared_dict, salt, timeout, expires)
     local ok, gc, err, now, forcible, nonce
 
     gc, err = shared_dict:incr("global_counter", 1)
-    now = ngx.now()
+    now = ngx.time()
 
     nonce = ngx.encode_base64(ngx.hmac_sha1(salt, now .. ":" .. gc))
 
-    ok, err, forcible = shared_dict:set(nonce, 0, now + timeout)
+    ok, err, forcible = shared_dict:set(nonce, 0, now + timeout, now + expires)
     if not ok then
         return nil, err
     end
@@ -95,22 +171,23 @@ end
 
 
 -- nonce stale or not
-local function nonce_stale(shared_dict, nonce, timeout, replays, expires)
+local function nonce_stale(shared_dict, nonce, replays)
     local nc, err = shared_dict:incr(nonce, 1)
-    if not nc or nc > replays then
+    if not nc or nc > replays then  -- already evicted or overused
         return true
     end
 
-    local val, flags = shared_dict:get(nonce)
-    if not val then  -- stale or not existent
+    local val, expires_at = shared_dict:get(nonce)
+    if not val then  -- already evicted 
         return true
     end
 
-    if flags - timeout + expires <= ngx.now() then
-        shared_dict:delete(key)
+    if expires_at <= ngx.now() then
+        shared_dict:delete(nonce)
         return true
     end
 
+    -- not expires and not overused
     return false
 end
 
@@ -144,6 +221,7 @@ function _M.setup(args)
 
         if user then
             _M.credentials[user] = {realm= realm, cipher= cipher}
+            print(user, realm, cipher)
             users = users + 1
         else
             print("[" .. line .. "] invalid: " .. realm)
@@ -156,22 +234,33 @@ function _M.setup(args)
         return false, "\"user_file\" no valid lines"
     end
 
+    -- Once a digest challenge has been successfully answered by the client,
+    -- subsequent requests will attempt to re-use the 'nonce' value from the 
+    -- original challenge. To complicate MitM attacks, it's best to limit the
+    -- duration a cached nonce will be accepted. 
     _M.expires = args.expires or 10
+    -- Nonce re-use should also be limited to a fixed number of requests.
     _M.replays = args.replays or 20
+    -- When a client first requests a protected page, the server returns a 401
+    -- status code along with a challenge in the __WWW-Authenticate__ header.
+    -- At this point most browsers will present a dialog box to the user
+    -- prompting them to log in. `timeout` defines how long challenges will
+    -- remain valid. If the user waits longer than this time before submitting
+    -- their name and password, the challenge will be considered `stale` and
+    -- they will be prompted to log in again.
     _M.timeout = args.timeout or 60
 
     -- initialize nonce counter
     math_seed(ngx.time())
     ngx.shared[args.shm]:set("global_counter", math_rand(1, 10000000))
 
-    -- choose a random salt
+    -- generate a random salt to encrypt nonce
     local salt, chars = "", "0123456789,.abcdefghijklmnopqrstuvwxyz-=_+!" ..
                             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     for i = 1, 8, 1 do
         local n = math_rand(#chars)
-        salt = salt .. str_sub(chars, n, n)
+        salt = salt .. chars:sub(n, n)
     end
-
     _M.salt = salt
 
     return true
@@ -179,7 +268,8 @@ end
 
 
 function _M.challenge(self, stale)
-    local nonce = next_nonce(ngx.shared[self.shm], self.salt, self.timeout)
+    local nonce = next_nonce(ngx.shared[self.shm], self.salt, self.timeout, 
+                             self.expires)
     if not nonce then 
         return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
@@ -197,87 +287,10 @@ function _M.challenge(self, stale)
     return ngx.exit(ngx.HTTP_UNAUTHORIZED)
 end
 
-local function get_value(header, name, quoted)
-    local n = header:sub("[, ]" .. name .. "=")
-    if not n then return nil end
-    
-    n = n + 1 + #name + 1  -- 1 for ',' or ' ', 1 for '='
-    
-    local states = {sw_start= 0, sw_value= 2, sw_done= 3}
-    local value_start, value_end
-    local state = states.sw_start
-    
-    for i = n, #header, 1 do
-        local c = string.sub(header, i, i)
-
-        if state == states.sw_start then
-            if quoted then
-                if c == "\"" then
-                    state, value_start = states.sw_value, i+1
-                else
-                    return nil
-                end
-            else
-                state, value_start = states.sw_value, i
-            end
-            
-        elseif state == states.sw_value then
-            if quoted then
-                if c == "\"" then
-                    state, value_end = states.sw_done, i-1
-                end
-            elseif c == "," then
-                state, value_end = states.sw_done, i-1
-            elseif i == #header then
-                state, value_end = states.sw_done, i
-            end
-        end
-    end
-    if state ~= states.sw_done then
-        return nil
-    end
-    
-    return header:sub(value_start, value_end)
-end
-
-
-local function get_context(header)
-    local prefix = "Digest "
-    if str_sub(header, 1, #prefix) ~= prefix then
-        return nil
-    end
-
-    local ctx = {}
-
-    ctx.user = get_value(header, "username", true)
-    ctx.qop = get_value(header, "qop", false)
-    ctx.realm = get_value(header, "realm", true)
-    ctx.nonce = get_value(header, "nonce", true)
-    ctx.nc = get_value(header, "nc", false)
-    ctx.uri = get_value(header, "uri", true)
-    ctx.cnonce = get_value(header, "cnonce", true)
-    ctx.response = get_value(header, "response", true)
-    ctx.opaque = get_value(header, "opaque", true)
-
-    -- `opaque` is optional
-    if not ctx.user or not ctx.response or not ctx.uri or 
-        not ctx.nonce or not realm 
-    then
-        return nil
-    end
-
-    -- if qop exsits, "auth" is the only allowed value for it
-    if ctx.qop and (ctx.qop ~= "auth" or not ctx.cnonce or not ctx.nc) 
-    then
-        return nil
-    end
-
-    return ctx
-end
 
 -- @return pass or not, stale or not
 function _M.verify(self, ctx)
-    local cred = self.credentials[user]
+    local cred = self.credentials[ctx.user]
     if not cred or cred.realm ~= ctx.realm then
         -- no such user or realm mismatch
         return false, false
@@ -285,7 +298,8 @@ function _M.verify(self, ctx)
 
     -- verification for "request-digest"
     --
-    local ha1, ha2 = cred.cipher, ngx.md5(ngx.req.get_method .. ":" .. ctx.uri)
+    local ha1, ha2 = cred.cipher, ngx.md5(tab_concat({ngx.req.get_method(),
+                                                     ctx.uri}, ":"))
     local digest 
 
     if ctx.qop then
@@ -305,8 +319,7 @@ function _M.verify(self, ctx)
 
     -- verification for "nonce" 
     --
-    local stale = nonce_stale(ngx.shared[self.shm], ctx.nonce, self.timeout, 
-                              self.replays, self.expires)
+    local stale = nonce_stale(ngx.shared[self.shm], ctx.nonce, self.replays)
     if stale then
         return false, true
     end
@@ -316,7 +329,6 @@ end
 
 
 function _M.auth(self)
-    -- credentials
     local header = ngx.var.http_authorization
     if not header then 
         return self:challenge(false)
@@ -324,12 +336,12 @@ function _M.auth(self)
 
     local ctx = get_context(header)
     if not ctx then
-        return ngx.exit(ngx.BAD_REQUEST)  -- suggestion of RFC 2617
+        return ngx.exit(ngx.HTTP_BAD_REQUEST)  -- suggestion of RFC 2617
     end
 
     local pass, stale = self:verify(ctx)
     if not pass then
-        return self:challenge(stale)
+        return self:challenge(false)
     end
 
     return ngx.exit(ngx.OK)
@@ -337,8 +349,8 @@ end
 
 
 function _M.new(realm, domain)
-    return setmetatable({realm= realm or _M.default_realm, domain= domain}, 
-                        {__index= _M})
+    realm = "baofeng"
+    return setmetatable({realm= realm, domain= domain}, {__index= _M})
 end
 
 
