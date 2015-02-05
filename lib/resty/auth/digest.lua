@@ -341,7 +341,7 @@ function _M.auth(self)
 
     local pass, stale = self:verify(ctx)
     if not pass then
-        return self:challenge(false)
+        return self:challenge(stale)
     end
 
     return ngx.exit(ngx.OK)
