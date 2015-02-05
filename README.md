@@ -1,3 +1,16 @@
+lua-resty-auth
+==============
+
+
+
+TODO
+----
+
+* md5crpyt for scheme basic 
+* crypt for scheme basic
+* test case
+* security audit
+
 
 
 Example Usage
@@ -29,14 +42,14 @@ Example Usage
         location /auth_basic/ {
             access_by_lua '
                 local auth = require("resty.auth")
-                auth.new("basic"):auth("my site")
+                auth.new("basic", "my site"):auth()
             ';
         }
 
         location /auth_digest/ {
             access_by_lua '
                 local auth = require("resty.auth")
-                auth.new("digest"):auth("my site2")
+                auth.new("digest", "my site"):auth()
             ';
         }
     }

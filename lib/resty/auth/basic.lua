@@ -167,7 +167,7 @@ local validators = {
     sha=validate_sha,
     ssha= validate_ssha,
     apr1= validate_apr1,
-    crypt= validate_crpyt,
+    crypt= validate_crypt,
 }
 
 local function validate(credentials, user, passwd)

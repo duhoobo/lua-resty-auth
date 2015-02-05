@@ -349,7 +349,6 @@ end
 
 
 function _M.new(realm, domain)
-    realm = "baofeng"
     return setmetatable({realm= realm, domain= domain}, {__index= _M})
 end
 

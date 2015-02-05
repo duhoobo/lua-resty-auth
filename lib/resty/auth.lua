@@ -5,8 +5,7 @@ local submodules = {
 
 
 local _M = {}
-
-_M.version = "0.0.1"
+_M._VERSION = "0.0.1"
 
 
 function _M.setup(args)
@@ -21,12 +20,12 @@ function _M.setup(args)
 end
 
 
-function _M.new(scheme)
+function _M.new(scheme, ...)
     if not scheme or not submodules[scheme] then
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
         
-    return submodules[scheme].new()
+    return submodules[scheme].new(...)
 end
 
 
