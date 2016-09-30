@@ -16,13 +16,13 @@ local _M = {
 local function get_value(header, name, quoted)
     local n = header:find("[, ]" .. name .. "=")
     if not n then return nil end
-    
+
     n = n + 1 + #name + 1  -- 1 for ',' or ' ', 1 for '='
-    
+
     local states = {sw_start= 0, sw_value= 2, sw_done= 3}
     local value_start, value_end
     local state = states.sw_start
-    
+
     for i = n, #header, 1 do
         local c = string.sub(header, i, i)
 
@@ -36,7 +36,7 @@ local function get_value(header, name, quoted)
             else
                 state, value_start = states.sw_value, i
             end
-            
+
         elseif state == states.sw_value then
             if quoted then
                 if c == "\"" then
@@ -52,7 +52,7 @@ local function get_value(header, name, quoted)
     if state ~= states.sw_done then
         return nil
     end
-    
+
     return header:sub(value_start, value_end)
 end
 
@@ -76,14 +76,14 @@ local function get_context(header)
     ctx.opaque = get_value(header, "opaque", true)
 
     -- `opaque` is optional
-    if not ctx.user or not ctx.response or not ctx.uri or 
-        not ctx.nonce or not ctx.realm 
+    if not ctx.user or not ctx.response or not ctx.uri or
+        not ctx.nonce or not ctx.realm
     then
         return nil
     end
 
     -- if qop exsits, "auth" is the only allowed value for it
-    if ctx.qop and (ctx.qop ~= "auth" or not ctx.cnonce or not ctx.nc) 
+    if ctx.qop and (ctx.qop ~= "auth" or not ctx.cnonce or not ctx.nc)
     then
         return nil
     end
@@ -110,7 +110,7 @@ local function parse_line(line)
     for i = 1, #line, 1 do
         local c = line:sub(i, i)
 
-        if state == states.sw_start then 
+        if state == states.sw_start then
             if c == "#" then -- skip comment
                 return nil, "a comment line"
             elseif c == ":" then
@@ -178,7 +178,7 @@ local function nonce_stale(shared_dict, nonce, replays)
     end
 
     local val, expires_at = shared_dict:get(nonce)
-    if not val then  -- already evicted 
+    if not val then  -- already evicted
         return true
     end
 
@@ -235,9 +235,9 @@ function _M.setup(args)
     end
 
     -- Once a digest challenge has been successfully answered by the client,
-    -- subsequent requests will attempt to re-use the 'nonce' value from the 
+    -- subsequent requests will attempt to re-use the 'nonce' value from the
     -- original challenge. To complicate MitM attacks, it's best to limit the
-    -- duration a cached nonce will be accepted. 
+    -- duration a cached nonce will be accepted.
     _M.expires = args.expires or 10
     -- Nonce re-use should also be limited to a fixed number of requests.
     _M.replays = args.replays or 20
@@ -268,9 +268,9 @@ end
 
 
 function _M.challenge(self, stale)
-    local nonce = next_nonce(ngx.shared[self.shm], self.salt, self.timeout, 
+    local nonce = next_nonce(ngx.shared[self.shm], self.salt, self.timeout,
                              self.expires)
-    if not nonce then 
+    if not nonce then
         return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
@@ -300,10 +300,10 @@ function _M.verify(self, ctx)
     --
     local ha1, ha2 = cred.cipher, ngx.md5(tab_concat({ngx.req.get_method(),
                                                      ctx.uri}, ":"))
-    local digest 
+    local digest
 
     if ctx.qop then
-        digest = ngx.md5(tab_concat({ha1, ctx.nonce, ctx.nc, ctx.cnonce, 
+        digest = ngx.md5(tab_concat({ha1, ctx.nonce, ctx.nc, ctx.cnonce,
                                     ctx.qop, ha2}, ":"))
     else
         digest = ngx.md5(tab_concat({ha1, ctx.nonce, ha2}, ":"))
@@ -317,7 +317,7 @@ function _M.verify(self, ctx)
         return false, false
     end
 
-    -- verification for "nonce" 
+    -- verification for "nonce"
     --
     local stale = nonce_stale(ngx.shared[self.shm], ctx.nonce, self.replays)
     if stale then
@@ -330,7 +330,7 @@ end
 
 function _M.auth(self)
     local header = ngx.var.http_authorization
-    if not header then 
+    if not header then
         return self:challenge(false)
     end
 

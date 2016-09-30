@@ -108,6 +108,10 @@ local function parse_line(line)
         return user, method, "", cipher
 
     elseif method == "sha" then
+        -- the {SHA} method shouldn't be used for security reasons as it's
+        -- vulnerable to attackes using rainbow tables. Use either {SSHA} or
+        -- {MD5} instead if you care about compatibility with other platforms,
+        -- or `crypt()` schemes provided by your OS if you aren't
         cipher = ngx.decode_base64(cipher)
         if not cipher then
             return nil, "sha cipher invalid"
@@ -121,6 +125,7 @@ local function parse_line(line)
         return user, method, cipher:sub(1, 2), cipher:sub(3)
 
     elseif method == "ssha" then
+        -- a {SSH} password is just a {SSHA} one with empty salt
         local bin = ngx.decode_base64(cipher)
         if not bin or #bin < 20 then
             return nil, "{SSHA} cipher invalid"
